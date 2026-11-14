@@ -20,6 +20,7 @@ import kotlin.math.min
 /**
  * Custom View that overlays translated manga speech bubbles directly on the screen.
  * Replaces original Japanese/Chinese/Korean text with clean, wrapped, auto-sized English text.
+ * Automatically expands narrow vertical boxes and scales typography dynamically using SP/DPI.
  */
 class TranslatedSpeechBubbleOverlayView @JvmOverloads constructor(
     context: Context,
@@ -31,22 +32,38 @@ class TranslatedSpeechBubbleOverlayView @JvmOverloads constructor(
     var isShowingOriginal: Boolean = false
         private set
 
+    var fontScale: FontScale = FontScale.NORMAL
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    private val scaledDensity = context.resources.displayMetrics.scaledDensity
+    private val density = context.resources.displayMetrics.density
+    private val screenWidth = context.resources.displayMetrics.widthPixels
+    private val screenHeight = context.resources.displayMetrics.heightPixels
+
     // Styling paints
     private val bubbleBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xF7FFFFFF.toInt() // 97% opaque clean white manga bubble fill
+        color = 0xFFFFFFFF.toInt() // Solid opaque white manga bubble cover
+        style = Paint.Style.FILL
+    }
+
+    private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x33000000 // Subtle dark shadow for depth over manga art
         style = Paint.Style.FILL
     }
 
     private val bubbleBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF1E1E1E.toInt() // Dark manga ink border
+        color = 0xFF141414.toInt() // Solid dark manga ink border
         style = Paint.Style.STROKE
-        strokeWidth = 3f
+        strokeWidth = 3.5f * density
     }
 
     private val originalBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFF1976D2.toInt() // Blue border when showing raw original text
         style = Paint.Style.STROKE
-        strokeWidth = 3.5f
+        strokeWidth = 4f * density
     }
 
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -61,15 +78,21 @@ class TranslatedSpeechBubbleOverlayView @JvmOverloads constructor(
 
     private val badgeTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
-        textSize = 20f
+        textSize = 12f * scaledDensity
         typeface = Typeface.DEFAULT_BOLD
     }
 
     private val rectF = RectF()
+    private val shadowRectF = RectF()
 
-    fun setTranslatedBlocks(blocks: List<TranslatedTextBlock>, showOriginal: Boolean = false) {
+    fun setTranslatedBlocks(
+        blocks: List<TranslatedTextBlock>,
+        showOriginal: Boolean = false,
+        scale: FontScale = fontScale
+    ) {
         this.translatedBlocks = blocks
         this.isShowingOriginal = showOriginal
+        this.fontScale = scale
         invalidate()
     }
 
@@ -93,64 +116,106 @@ class TranslatedSpeechBubbleOverlayView @JvmOverloads constructor(
         if (translatedBlocks.isEmpty()) return
 
         for (block in translatedBlocks) {
-            val box = block.boundingBox
-            if (box.width() < 16 || box.height() < 16) continue
+            val originalBox = block.boundingBox
+            if (originalBox.width() < 16 || originalBox.height() < 16) continue
 
             val text = if (isShowingOriginal) block.originalText else block.translatedText
             if (text.isBlank()) continue
 
-            // Define padded bubble bounds
-            val paddingX = max(6f, box.width() * 0.08f)
-            val paddingY = max(6f, box.height() * 0.08f)
-            rectF.set(box)
+            // 1. Smart horizontal expansion:
+            // Japanese text is vertical and narrow. Horizontal English dialogue needs width to wrap naturally.
+            val minComfortableWidth = when {
+                text.length > 50 -> 260f * density
+                text.length > 25 -> 200f * density
+                text.length > 10 -> 150f * density
+                else -> 100f * density
+            }
+            val desiredWidth = max(originalBox.width().toFloat() * 1.35f, minComfortableWidth)
+            val extraWidth = (desiredWidth - originalBox.width()).coerceAtLeast(0f)
 
-            val cornerRadius = min(20f, min(box.width(), box.height()) * 0.25f)
+            var bubbleLeft = (originalBox.left - extraWidth / 2f).coerceAtLeast(16f * density)
+            var bubbleRight = bubbleLeft + desiredWidth
+            if (bubbleRight > screenWidth - 16f * density) {
+                bubbleRight = screenWidth - 16f * density
+                bubbleLeft = (bubbleRight - desiredWidth).coerceAtLeast(16f * density)
+            }
 
-            // Draw clean speech bubble cover
+            val paddingX = 10f * density
+            val paddingY = 8f * density
+            val availWidth = (bubbleRight - bubbleLeft - paddingX * 2).toInt().coerceAtLeast(20)
+
+            // 2. High-legibility font sizing using SP with guaranteed minimum readable threshold
+            val minFontSizePx = 15f * scaledDensity * fontScale.multiplier
+            val maxFontSizePx = 28f * scaledDensity * fontScale.multiplier
+            val baseAvailHeight = (originalBox.height() - paddingY * 2).toInt().coerceAtLeast(20)
+
+            val layout = createFittedLayout(text, availWidth, baseAvailHeight, minFontSizePx, maxFontSizePx)
+
+            // 3. Dynamic height growth:
+            // If the readable text needs more vertical space than the box, expand outward from center
+            val neededHeight = layout.height + paddingY * 2
+            val finalHeight = max(originalBox.height().toFloat(), neededHeight)
+            val extraHeight = (finalHeight - originalBox.height()).coerceAtLeast(0f)
+
+            var bubbleTop = (originalBox.top - extraHeight / 2f).coerceAtLeast(16f * density)
+            var bubbleBottom = bubbleTop + finalHeight
+            if (bubbleBottom > screenHeight - 16f * density) {
+                bubbleBottom = screenHeight - 16f * density
+                bubbleTop = (bubbleBottom - finalHeight).coerceAtLeast(16f * density)
+            }
+
+            rectF.set(bubbleLeft, bubbleTop, bubbleRight, bubbleBottom)
+            val cornerRadius = min(22f * density, min(rectF.width(), rectF.height()) * 0.28f)
+
+            // Draw subtle shadow for depth
+            shadowRectF.set(rectF.left + 2f * density, rectF.top + 3f * density, rectF.right + 2f * density, rectF.bottom + 3f * density)
+            canvas.drawRoundRect(shadowRectF, cornerRadius, cornerRadius, shadowPaint)
+
+            // Draw clean white speech bubble cover
             canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, bubbleBgPaint)
             val border = if (isShowingOriginal) originalBorderPaint else bubbleBorderPaint
             canvas.drawRoundRect(rectF, cornerRadius, cornerRadius, border)
 
-            // Draw fitted, centered, wrapped text inside speech bubble
-            val availWidth = (box.width() - paddingX * 2).toInt().coerceAtLeast(10)
-            val availHeight = (box.height() - paddingY * 2).toInt().coerceAtLeast(10)
-
-            val layout = createFittedLayout(text, availWidth, availHeight)
-
-            val textX = box.left + paddingX + (availWidth - layout.width) / 2f
-            val textY = box.top + paddingY + (availHeight - layout.height) / 2f
+            // Center and draw wrapped text inside speech bubble
+            val textX = bubbleLeft + paddingX + (availWidth - layout.width) / 2f
+            val textY = bubbleTop + paddingY + ((bubbleBottom - bubbleTop - paddingY * 2) - layout.height) / 2f
 
             canvas.save()
             canvas.translate(textX, textY)
             layout.draw(canvas)
             canvas.restore()
 
-            // When displaying original, show small [RAW] or [V] indicator tag
+            // If displaying raw original text or vertical text, show indicator tag
             if (isShowingOriginal || block.isVertical) {
                 val tagText = if (isShowingOriginal) "ORIGINAL" else "V"
-                val tagWidth = badgeTextPaint.measureText(tagText) + 12f
-                val tagHeight = 24f
-                val tagLeft = box.right - tagWidth
-                val tagTop = (box.top - tagHeight).coerceAtLeast(0f)
+                val tagWidth = badgeTextPaint.measureText(tagText) + 14f * density
+                val tagHeight = 18f * density
+                val tagLeft = bubbleRight - tagWidth
+                val tagTop = (bubbleTop - tagHeight - 2f * density).coerceAtLeast(0f)
 
-                rectF.set(tagLeft, tagTop, box.right.toFloat(), tagTop + tagHeight)
-                canvas.drawRoundRect(rectF, 6f, 6f, badgeBgPaint)
-                canvas.drawText(tagText, tagLeft + 6f, tagTop + 18f, badgeTextPaint)
+                rectF.set(tagLeft, tagTop, bubbleRight, tagTop + tagHeight)
+                canvas.drawRoundRect(rectF, 6f * density, 6f * density, badgeBgPaint)
+                canvas.drawText(tagText, tagLeft + 7f * density, tagTop + 14f * density, badgeTextPaint)
             }
         }
     }
 
     /**
-     * Binary searches for the best font size (between 10sp and 34sp) so the translated
-     * English dialogue fills the speech bubble comfortably without clipping or overflowing.
+     * Finds the optimal legible font size (between [minPx] and [maxPx]) using binary search.
+     * Guaranteed never to drop below [minPx] so text is always easy to read.
      */
-    private fun createFittedLayout(text: String, availWidth: Int, availHeight: Int): StaticLayout {
-        var low = 11f
-        var high = min(34f, availHeight * 0.45f).coerceAtLeast(low)
+    private fun createFittedLayout(
+        text: String,
+        availWidth: Int,
+        availHeight: Int,
+        minPx: Float,
+        maxPx: Float
+    ): StaticLayout {
+        var low = minPx
+        var high = maxPx
         var bestSize = low
         var bestLayout: StaticLayout? = null
 
-        // Quick binary search over 5 iterations for ideal typography
         for (i in 0 until 5) {
             val mid = (low + high) / 2f
             textPaint.textSize = mid
@@ -177,12 +242,12 @@ class TranslatedSpeechBubbleOverlayView @JvmOverloads constructor(
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             StaticLayout.Builder.obtain(text, 0, text.length, textPaint, width)
                 .setAlignment(Layout.Alignment.ALIGN_CENTER)
-                .setLineSpacing(0f, 1.05f)
+                .setLineSpacing(0f, 1.1f)
                 .setIncludePad(false)
                 .build()
         } else {
             @Suppress("DEPRECATION")
-            StaticLayout(text, textPaint, width, Layout.Alignment.ALIGN_CENTER, 1.05f, 0f, false)
+            StaticLayout(text, textPaint, width, Layout.Alignment.ALIGN_CENTER, 1.1f, 0f, false)
         }
     }
 }

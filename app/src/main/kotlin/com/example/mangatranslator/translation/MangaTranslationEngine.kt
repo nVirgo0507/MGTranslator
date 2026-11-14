@@ -1,5 +1,6 @@
 package com.example.mangatranslator.translation
 
+import com.example.mangatranslator.ocr.LanguageScriptDetector
 import com.example.mangatranslator.ocr.OcrLanguage
 import com.example.mangatranslator.ocr.RecognizedTextBlock
 import com.google.mlkit.common.model.DownloadConditions
@@ -8,6 +9,9 @@ import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
@@ -23,7 +27,8 @@ enum class TargetLanguage(val code: String, val displayName: String) {
 
 /**
  * On-device translation engine specialized for Manga dialogue.
- * Performs intelligent text cleaning, automatic model downloading, and in-memory caching.
+ * Performs intelligent text cleaning, automatic model downloading, parallel translation,
+ * and in-memory caching.
  */
 class MangaTranslationEngine(
     private var sourceLanguage: OcrLanguage = OcrLanguage.JAPANESE,
@@ -82,7 +87,8 @@ class MangaTranslationEngine(
     }
 
     /**
-     * Translates a list of recognized manga text blocks into English.
+     * Translates a list of recognized manga text blocks into English in parallel.
+     * Normalizes text (Chōonpu, half-width kana, ellipses) and skips non-source language text.
      */
     suspend fun translateBlocks(
         blocks: List<RecognizedTextBlock>,
@@ -105,68 +111,59 @@ class MangaTranslationEngine(
             ensureModelDownloaded(onStatus)
         }
 
-        blocks.map { block ->
-            val cleanedOriginal = cleanMangaText(block.text, sourceLanguage, block.isVertical)
-            if (cleanedOriginal.isBlank()) {
-                return@map TranslatedTextBlock(
-                    originalBlock = block,
-                    originalText = block.text,
-                    translatedText = "",
-                    boundingBox = block.boundingBox,
-                    isVertical = block.isVertical
-                )
-            }
+        coroutineScope {
+            blocks.map { block ->
+                async {
+                    val cleanedOriginal = cleanMangaText(block.text, sourceLanguage, block.isVertical)
+                    if (cleanedOriginal.isBlank()) {
+                        return@async TranslatedTextBlock(
+                            originalBlock = block,
+                            originalText = block.text,
+                            translatedText = "",
+                            boundingBox = block.boundingBox,
+                            isVertical = block.isVertical
+                        )
+                    }
 
-            // Check cache first for instant response
-            val cached = translationCache[cleanedOriginal]
-            val translated = if (cached != null) {
-                cached
-            } else {
-                try {
-                    val result = client.translate(cleanedOriginal).await()
-                    translationCache[cleanedOriginal] = result
-                    result
-                } catch (e: Exception) {
-                    // Fallback to original text if translation failed
-                    cleanedOriginal
+                    // Fast check: If the block contains zero characters of the source language
+                    // (e.g. it is already English, a page number, or UI text), do not run it through the NMT model
+                    val isSourceLang = LanguageScriptDetector.matchesLanguage(cleanedOriginal, sourceLanguage)
+                    val translated = if (!isSourceLang) {
+                        cleanedOriginal
+                    } else {
+                        // Check cache first for instant response
+                        val cached = translationCache[cleanedOriginal]
+                        if (cached != null) {
+                            cached
+                        } else {
+                            try {
+                                val result = client.translate(cleanedOriginal).await()
+                                translationCache[cleanedOriginal] = result
+                                result
+                            } catch (e: Exception) {
+                                // Fallback to original text if translation failed
+                                cleanedOriginal
+                            }
+                        }
+                    }
+
+                    TranslatedTextBlock(
+                        originalBlock = block,
+                        originalText = cleanedOriginal,
+                        translatedText = translated,
+                        boundingBox = block.boundingBox,
+                        isVertical = block.isVertical
+                    )
                 }
-            }
-
-            TranslatedTextBlock(
-                originalBlock = block,
-                originalText = cleanedOriginal,
-                translatedText = translated,
-                boundingBox = block.boundingBox,
-                isVertical = block.isVertical
-            )
+            }.awaitAll()
         }
     }
 
     /**
-     * Preprocesses manga text to optimize translation quality.
-     * - Japanese / Chinese: Removes line breaks between kanji/kana without adding spaces.
-     * - Korean: Normalizes line breaks to single spaces.
-     * - Fixes common manga OCR artifacts (broken ellipses, isolated punctuation).
+     * Preprocesses and normalizes manga text using [MangaTextNormalizer] to maximize translation quality.
      */
     private fun cleanMangaText(text: String, language: OcrLanguage, isVertical: Boolean): String {
-        var cleaned = text.trim()
-
-        when (language) {
-            OcrLanguage.JAPANESE, OcrLanguage.CHINESE -> {
-                // Vertical manga columns should be joined continuously without extra spacing
-                cleaned = cleaned.replace("\n", "")
-                cleaned = cleaned.replace(" ", "")
-                // Standardize full-width ellipsis and long dash
-                cleaned = cleaned.replace("...", "…")
-                cleaned = cleaned.replace("···", "…")
-            }
-            OcrLanguage.KOREAN -> {
-                cleaned = cleaned.replace("\n", " ")
-                cleaned = cleaned.replace(Regex("\\s+"), " ")
-            }
-        }
-
-        return cleaned
+        return MangaTextNormalizer.normalize(text, language)
     }
 
     private fun mapSourceLanguage(language: OcrLanguage): String {

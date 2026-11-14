@@ -40,12 +40,29 @@ class MangaOcrEngine(
         }
     }
 
+    val selectedLanguage: OcrLanguage
+        get() = currentLanguage
+
     /**
      * Processes a screen bitmap and extracts text blocks, bounding boxes, and vertical layout info.
+     *
+     * Preprocesses the image with contrast stretching and screentone suppression, recognizes text,
+     * filters non-target language noise, and clusters fragmented columns into cohesive speech bubbles.
      */
-    suspend fun processImage(bitmap: Bitmap): OcrResult = withContext(Dispatchers.Default) {
+    suspend fun processImage(
+        bitmap: Bitmap,
+        filterByLanguage: Boolean = true
+    ): OcrResult = withContext(Dispatchers.Default) {
         val startTime = System.currentTimeMillis()
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
+
+        // Enhance image contrast to separate dialogue strokes from background screentones
+        val enhancedBitmap = try {
+            MangaImagePreprocessor.enhanceForOcr(bitmap)
+        } catch (e: Exception) {
+            bitmap
+        }
+
+        val inputImage = InputImage.fromBitmap(enhancedBitmap, 0)
 
         val mlkitText: Text = try {
             textRecognizer.process(inputImage).await()
@@ -56,6 +73,10 @@ class MangaOcrEngine(
                 imageWidth = bitmap.width,
                 imageHeight = bitmap.height
             )
+        } finally {
+            if (enhancedBitmap !== bitmap) {
+                enhancedBitmap.recycle()
+            }
         }
 
         val recognizedBlocks = mlkitText.textBlocks.mapNotNull { block ->
@@ -64,8 +85,6 @@ class MangaOcrEngine(
             if (box.width() < 10 || box.height() < 10) return@mapNotNull null
 
             // Detect vertical text orientation typical in manga:
-            // In vertical layout, individual lines are taller than they are wide (height > width * 1.2),
-            // or the block itself is tall and contains multiple thin vertical lines.
             val isVertical = detectVerticalLayout(block)
 
             val lines = block.lines.map { line ->
@@ -83,12 +102,17 @@ class MangaOcrEngine(
             }
 
             // For vertical Japanese manga, lines are read Right-to-Left (RTL).
-            // ML Kit might return lines in arbitrary or LTR order. If vertical, sort lines by X descending.
             val formattedText = if (isVertical && lines.size > 1) {
                 val sortedLines = lines.sortedByDescending { it.boundingBox?.centerX() ?: 0 }
                 sortedLines.joinToString("\n") { it.text }
             } else {
                 block.text
+            }
+
+            // Filter out text from other languages (e.g. English UI buttons, chapter headers,
+            // page numbers) when language filtering is active.
+            if (filterByLanguage && !LanguageScriptDetector.matchesLanguage(formattedText, currentLanguage)) {
+                return@mapNotNull null
             }
 
             RecognizedTextBlock(
@@ -100,8 +124,11 @@ class MangaOcrEngine(
             )
         }
 
+        // Cluster adjacent vertical columns into unified speech bubble units
+        val clusteredBlocks = MangaDialogueClusterer.clusterDialogueBlocks(recognizedBlocks, currentLanguage)
+
         OcrResult(
-            blocks = recognizedBlocks,
+            blocks = clusteredBlocks,
             executionTimeMs = System.currentTimeMillis() - startTime,
             imageWidth = bitmap.width,
             imageHeight = bitmap.height
@@ -114,11 +141,17 @@ class MangaOcrEngine(
     private fun detectVerticalLayout(block: Text.TextBlock): Boolean {
         if (block.lines.isEmpty()) return false
 
+        val box = block.boundingBox
+        // If the block itself is clearly tall and slender (height > width * 1.1)
+        if (box != null && box.height() > box.width() * 1.15f) {
+            return true
+        }
+
         var verticalLineCount = 0
         for (line in block.lines) {
-            val box = line.boundingBox ?: continue
+            val lineBox = line.boundingBox ?: continue
             // A line is vertical if its height is significantly greater than its width
-            if (box.height() > box.width() * 1.15f) {
+            if (lineBox.height() > lineBox.width() * 1.15f) {
                 verticalLineCount++
             }
         }

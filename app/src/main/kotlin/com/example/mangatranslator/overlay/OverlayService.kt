@@ -67,12 +67,16 @@ class OverlayService : Service() {
         const val ACTION_TOGGLE_AUTO_MODE = "com.example.mangatranslator.TOGGLE_AUTO_MODE"
         const val ACTION_SET_OCR_LANGUAGE = "com.example.mangatranslator.SET_OCR_LANGUAGE"
         const val ACTION_SET_TARGET_LANGUAGE = "com.example.mangatranslator.SET_TARGET_LANGUAGE"
+        const val ACTION_SET_FONT_SCALE = "com.example.mangatranslator.SET_FONT_SCALE"
+        const val ACTION_SET_FILTER_NON_SOURCE = "com.example.mangatranslator.SET_FILTER_NON_SOURCE"
         const val ACTION_TOGGLE_ORIGINAL = "com.example.mangatranslator.TOGGLE_ORIGINAL"
 
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
         const val EXTRA_OCR_LANGUAGE = "extra_ocr_language"
         const val EXTRA_TARGET_LANGUAGE = "extra_target_language"
+        const val EXTRA_FONT_SCALE = "extra_font_scale"
+        const val EXTRA_FILTER_NON_SOURCE = "extra_filter_non_source"
 
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "manga_translator_overlay_channel"
@@ -88,6 +92,12 @@ class OverlayService : Service() {
 
         private val _currentTargetLanguage = MutableStateFlow(TargetLanguage.ENGLISH)
         val currentTargetLanguage: StateFlow<TargetLanguage> = _currentTargetLanguage.asStateFlow()
+
+        private val _fontScale = MutableStateFlow(FontScale.NORMAL)
+        val fontScale: StateFlow<FontScale> = _fontScale.asStateFlow()
+
+        private val _filterNonSourceLanguage = MutableStateFlow(true)
+        val filterNonSourceLanguage: StateFlow<Boolean> = _filterNonSourceLanguage.asStateFlow()
 
         private val _latestOcrResult = MutableStateFlow<OcrResult?>(null)
         val latestOcrResult: StateFlow<OcrResult?> = _latestOcrResult.asStateFlow()
@@ -126,19 +136,47 @@ class OverlayService : Service() {
         }
 
         fun setLanguage(context: Context, language: OcrLanguage) {
-            val intent = Intent(context, OverlayService::class.java).apply {
-                action = ACTION_SET_OCR_LANGUAGE
-                putExtra(EXTRA_OCR_LANGUAGE, language.name)
+            _currentOcrLanguage.value = language
+            if (_isServiceRunning.value) {
+                val intent = Intent(context, OverlayService::class.java).apply {
+                    action = ACTION_SET_OCR_LANGUAGE
+                    putExtra(EXTRA_OCR_LANGUAGE, language.name)
+                }
+                context.startService(intent)
             }
-            context.startService(intent)
         }
 
         fun setTargetLanguage(context: Context, language: TargetLanguage) {
-            val intent = Intent(context, OverlayService::class.java).apply {
-                action = ACTION_SET_TARGET_LANGUAGE
-                putExtra(EXTRA_TARGET_LANGUAGE, language.name)
+            _currentTargetLanguage.value = language
+            if (_isServiceRunning.value) {
+                val intent = Intent(context, OverlayService::class.java).apply {
+                    action = ACTION_SET_TARGET_LANGUAGE
+                    putExtra(EXTRA_TARGET_LANGUAGE, language.name)
+                }
+                context.startService(intent)
             }
-            context.startService(intent)
+        }
+
+        fun setFontScale(context: Context, scale: FontScale) {
+            _fontScale.value = scale
+            if (_isServiceRunning.value) {
+                val intent = Intent(context, OverlayService::class.java).apply {
+                    action = ACTION_SET_FONT_SCALE
+                    putExtra(EXTRA_FONT_SCALE, scale.name)
+                }
+                context.startService(intent)
+            }
+        }
+
+        fun setFilterNonSourceLanguage(context: Context, enabled: Boolean) {
+            _filterNonSourceLanguage.value = enabled
+            if (_isServiceRunning.value) {
+                val intent = Intent(context, OverlayService::class.java).apply {
+                    action = ACTION_SET_FILTER_NON_SOURCE
+                    putExtra(EXTRA_FILTER_NON_SOURCE, enabled)
+                }
+                context.startService(intent)
+            }
         }
 
         fun toggleOriginalText(context: Context) {
@@ -200,6 +238,25 @@ class OverlayService : Service() {
             }
             ACTION_TOGGLE_ORIGINAL -> {
                 toggleOriginalTextInternal()
+            }
+            ACTION_SET_FONT_SCALE -> {
+                val scaleName = intent.getStringExtra(EXTRA_FONT_SCALE)
+                if (scaleName != null) {
+                    try {
+                        val scale = FontScale.valueOf(scaleName)
+                        _fontScale.value = scale
+                        speechBubbleOverlayView?.fontScale = scale
+                        Toast.makeText(this, "Font Size: ${scale.label}", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        // Ignore
+                    }
+                }
+            }
+            ACTION_SET_FILTER_NON_SOURCE -> {
+                val filter = intent.getBooleanExtra(EXTRA_FILTER_NON_SOURCE, true)
+                _filterNonSourceLanguage.value = filter
+                val label = if (filter) "Filtering non-source text ON" else "Translating all text"
+                Toast.makeText(this, label, Toast.LENGTH_SHORT).show()
             }
             ACTION_SET_OCR_LANGUAGE -> {
                 val langName = intent.getStringExtra(EXTRA_OCR_LANGUAGE)
@@ -423,7 +480,9 @@ class OverlayService : Service() {
         translationOverlayView = overlayView
 
         val container = overlayView.findViewById<FrameLayout>(R.id.translation_bubbles_container)
-        val speechOverlay = TranslatedSpeechBubbleOverlayView(this)
+        val speechOverlay = TranslatedSpeechBubbleOverlayView(this).apply {
+            fontScale = _fontScale.value
+        }
         speechBubbleOverlayView = speechOverlay
         container.addView(speechOverlay)
 
@@ -483,16 +542,15 @@ class OverlayService : Service() {
             Toast.makeText(this, "Auto-reading mode ON: Translating pages automatically!", Toast.LENGTH_SHORT).show()
             startAutoReading()
         } else {
-            Toast.makeText(this, "Auto-reading mode OFF: Manual tap mode.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Manual mode: Tap floating bubble to translate.", Toast.LENGTH_SHORT).show()
             screenCaptureManager?.stopAutoCapture()
-            clearTranslationBubbles()
         }
     }
 
     private fun toggleOriginalTextInternal() {
         val overlay = speechBubbleOverlayView ?: return
         val isShowingOriginal = overlay.toggleDisplayMode()
-        val label = if (isShowingOriginal) "Showing Original Text" else "Showing Translated English"
+        val label = if (isShowingOriginal) "Showing Original Manga Text" else "Showing English Translation"
         Toast.makeText(this, label, Toast.LENGTH_SHORT).show()
     }
 
@@ -514,22 +572,26 @@ class OverlayService : Service() {
         serviceScope.launch {
             try {
                 val modeTag = if (isAuto) "[Auto]" else "[Manual]"
-                showStatusBadge("$modeTag Scanning manga dialogue...")
+                val srcLang = _currentOcrLanguage.value.name
+                showStatusBadge("$modeTag Scanning $srcLang manga dialogue...")
 
                 val ocrStart = System.currentTimeMillis()
-                val ocrResult = mangaOcrEngine.processImage(bitmap)
+                val ocrResult = mangaOcrEngine.processImage(
+                    bitmap = bitmap,
+                    filterByLanguage = _filterNonSourceLanguage.value
+                )
                 val ocrTime = System.currentTimeMillis() - ocrStart
                 _latestOcrResult.value = ocrResult
 
                 if (ocrResult.blocks.isEmpty()) {
-                    showStatusBadge("$modeTag No speech bubbles detected")
+                    showStatusBadge("$modeTag No $srcLang dialogue detected")
                     speechBubbleOverlayView?.clear()
                     delay(2000)
                     translationOverlayView?.findViewById<View>(R.id.tv_capture_status)?.visibility = View.GONE
                     return@launch
                 }
 
-                showStatusBadge("$modeTag Translating ${ocrResult.blocks.size} speech bubbles...")
+                showStatusBadge("$modeTag Translating ${ocrResult.blocks.size} $srcLang speech bubbles...")
 
                 val transStart = System.currentTimeMillis()
                 val translatedBlocks = mangaTranslationEngine.translateBlocks(ocrResult.blocks) { status ->
@@ -548,9 +610,13 @@ class OverlayService : Service() {
                 _latestTranslationResult.value = translationResult
 
                 // Render clean translated speech bubbles directly covering original dialogue
-                speechBubbleOverlayView?.setTranslatedBlocks(translatedBlocks, showOriginal = false)
+                speechBubbleOverlayView?.setTranslatedBlocks(
+                    blocks = translatedBlocks,
+                    showOriginal = false,
+                    scale = _fontScale.value
+                )
 
-                val statusMsg = "$modeTag Translated ${translatedBlocks.size} bubbles in ${ocrTime + transTime}ms"
+                val statusMsg = "$modeTag Translated ${translatedBlocks.size} $srcLang bubbles in ${ocrTime + transTime}ms"
                 showStatusBadge(statusMsg)
 
                 // Auto-hide status banner after 3 seconds

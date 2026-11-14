@@ -12,6 +12,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -65,6 +67,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.NavKey
 import com.example.mangatranslator.R
 import com.example.mangatranslator.ocr.OcrLanguage
+import com.example.mangatranslator.overlay.FontScale
 import com.example.mangatranslator.overlay.OverlayService
 import com.example.mangatranslator.translation.TargetLanguage
 
@@ -136,6 +139,8 @@ fun MainScreen(
     val isAutoModeActive by OverlayService.isAutoModeActive.collectAsStateWithLifecycle()
     val currentOcrLanguage by OverlayService.currentOcrLanguage.collectAsStateWithLifecycle()
     val currentTargetLanguage by OverlayService.currentTargetLanguage.collectAsStateWithLifecycle()
+    val currentFontScale by OverlayService.fontScale.collectAsStateWithLifecycle()
+    val filterNonSourceLanguage by OverlayService.filterNonSourceLanguage.collectAsStateWithLifecycle()
     val latestTranslationResult by OverlayService.latestTranslationResult.collectAsStateWithLifecycle()
     val modelDownloadStatus by OverlayService.modelDownloadStatus.collectAsStateWithLifecycle()
 
@@ -197,7 +202,8 @@ fun MainScreen(
                             Text(
                                 text = if (isOverlayRunning) {
                                     val mode = if (isAutoModeActive) "Auto-Reading" else "Manual Tap"
-                                    "Mode: $mode • $currentOcrLanguage → ${currentTargetLanguage.displayName}"
+                                    val filterTag = if (filterNonSourceLanguage) " • Strict Filter" else ""
+                                    "Mode: $mode • $currentOcrLanguage → ${currentTargetLanguage.displayName} (${currentFontScale.label})$filterTag"
                                 } else {
                                     "Start service to enable floating bubble & manga translation."
                                 },
@@ -218,7 +224,7 @@ fun MainScreen(
                 }
             }
 
-            // Language Selection Card
+            // Language & Appearance Selection Card
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp)
@@ -276,6 +282,55 @@ fun MainScreen(
                             )
                         }
                     }
+
+                    Text(
+                        text = "Speech Bubble Font Size",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FontScale.entries.forEach { scale ->
+                            FilterChip(
+                                selected = currentFontScale == scale,
+                                onClick = {
+                                    OverlayService.setFontScale(context, scale)
+                                },
+                                label = { Text(scale.label) }
+                            )
+                        }
+                    }
+
+                    // Strict Language Filter Switch
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Strict Language Filter",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Only translates text containing ${currentOcrLanguage.name} characters. Skips English reader UI, page numbers, and menus for 5x faster scanning.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = filterNonSourceLanguage,
+                            onCheckedChange = { isChecked ->
+                                OverlayService.setFilterNonSourceLanguage(context, isChecked)
+                            }
+                        )
+                    }
                 }
             }
 
@@ -313,7 +368,7 @@ fun MainScreen(
 
                         if (result.blocks.isEmpty()) {
                             Text(
-                                "No speech bubbles or dialogue detected on screen.",
+                                "No speech bubbles or dialogue detected in ${result.sourceLanguage}.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
@@ -532,8 +587,12 @@ fun MainScreen(
                     Text(
                         "• On-Device ML Kit Translation:\n" +
                         "   Free, private, zero-latency on-device translation for Japanese, Chinese, and Korean into English.\n\n" +
-                        "• Speech Bubble Replacement Overlay:\n" +
-                        "   Replaces original Japanese speech bubbles with clean, styled white speech bubbles and auto-wrapped English text directly over the manga page.\n\n" +
+                        "• Smart Language & Script Verification:\n" +
+                        "   When reading Japanese manga, the app checks Unicode script ranges (Hiragana, Katakana, Kanji) to only scan and translate actual manga dialogue. It automatically ignores English reader UI, page indicators ('12/45'), navigation buttons, and system text—drastically reducing translation latency and eliminating garbage translations.\n\n" +
+                        "• Dynamic Font Sizing & Bubble Auto-Expansion:\n" +
+                        "   Solves small text readability by scaling font sizes dynamically (15sp to 28sp) and smartly expanding narrow vertical Japanese speech bubbles horizontally to fit English phrasing naturally.\n\n" +
+                        "• Customizable Font Scale:\n" +
+                        "   Easily switch between Compact (85%), Normal (115%), Large (145%), and Extra Large (180%) directly from the settings above.\n\n" +
                         "• Interactive Controls:\n" +
                         "   • Single tap bubble: Scan and translate current screen.\n" +
                         "   • Double tap bubble: Toggle between translated English and original text.\n" +
