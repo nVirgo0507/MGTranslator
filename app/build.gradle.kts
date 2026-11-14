@@ -81,4 +81,10 @@ dependencies {
   implementation(libs.androidx.navigation3.ui)
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
+
+  // ML Kit Text Recognition
+  implementation(libs.mlkit.text.japanese)
+  implementation(libs.mlkit.text.chinese)
+  implementation(libs.mlkit.text.korean)
+  implementation(libs.kotlinx.coroutines.play.services)
 }

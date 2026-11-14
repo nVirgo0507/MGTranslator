@@ -15,4 +15,16 @@
         android:contentDescription="Translate"
         android:elevation="6dp" />
 
+    <!-- Badge indicating auto-reading status (Green when active) -->
+    <View
+        android:id="@+id/view_auto_badge"
+        android:layout_width="14dp"
+        android:layout_height="14dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="6dp"
+        android:layout_marginEnd="6dp"
+        android:background="@drawable/bg_auto_badge"
+        android:elevation="8dp"
+        android:visibility="gone" />
+
 </FrameLayout>

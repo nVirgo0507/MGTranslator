@@ -1,8 +1,11 @@
 package com.example.mangatranslator.ui.main
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -30,9 +33,11 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -59,6 +64,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.NavKey
 import com.example.mangatranslator.R
+import com.example.mangatranslator.ocr.OcrLanguage
 import com.example.mangatranslator.overlay.OverlayService
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -112,7 +118,23 @@ fun MainScreen(
         hasNotificationPermission = isGranted
     }
 
+    // Launcher for MediaProjection screen capture consent dialog
+    val mediaProjectionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            OverlayService.start(
+                context = context,
+                resultCode = result.resultCode,
+                resultData = result.data
+            )
+        }
+    }
+
     val isOverlayRunning by OverlayService.isServiceRunning.collectAsStateWithLifecycle()
+    val isAutoModeActive by OverlayService.isAutoModeActive.collectAsStateWithLifecycle()
+    val currentOcrLanguage by OverlayService.currentOcrLanguage.collectAsStateWithLifecycle()
+    val latestOcrResult by OverlayService.latestOcrResult.collectAsStateWithLifecycle()
 
     Scaffold(
         modifier = modifier,
@@ -146,34 +168,144 @@ fun MainScreen(
                 ),
                 shape = RoundedCornerShape(16.dp)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(20.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clip(CircleShape)
-                            .background(if (isOverlayRunning) Color(0xFF4CAF50) else Color(0xFF9E9E9E))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clip(CircleShape)
+                                .background(if (isOverlayRunning) Color(0xFF4CAF50) else Color(0xFF9E9E9E))
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isOverlayRunning) "Overlay & OCR Active" else "Translator Inactive",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = if (isOverlayRunning) {
+                                    if (isAutoModeActive) {
+                                        "Mode: Auto-Read (Translates on page turns) • Lang: $currentOcrLanguage"
+                                    } else {
+                                        "Mode: Manual Tap (Tap bubble to scan) • Lang: $currentOcrLanguage"
+                                    }
+                                } else {
+                                    "Start service to enable floating bubble & manga OCR."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            // OCR Language Selection Card
+            OutlinedCard(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Manga Script / Language",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (isOverlayRunning) "Overlay Active" else "Overlay Inactive",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = if (isOverlayRunning) {
-                                "Floating bubble is visible on your screen."
-                            } else {
-                                "Start the overlay service to display the bubble."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OcrLanguage.entries.forEach { lang ->
+                            FilterChip(
+                                selected = currentOcrLanguage == lang,
+                                onClick = {
+                                    OverlayService.setLanguage(context, lang)
+                                },
+                                label = {
+                                    Text(
+                                        when (lang) {
+                                            OcrLanguage.JAPANESE -> "Japanese (日本語)"
+                                            OcrLanguage.CHINESE -> "Chinese (中文)"
+                                            OcrLanguage.KOREAN -> "Korean (한국어)"
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Live OCR Diagnostics Card (shows recognized manga text in real time)
+            latestOcrResult?.let { result ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    ),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Latest OCR Scan",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "${result.executionTimeMs}ms • ${result.blocks.size} blocks (${result.blocks.count { it.isVertical }} vert)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+
+                        if (result.blocks.isEmpty()) {
+                            Text(
+                                "No speech bubbles or text detected on the latest screen frame.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                result.blocks.take(5).forEachIndexed { index, block ->
+                                    val tag = if (block.isVertical) "[Vertical] " else ""
+                                    Text(
+                                        text = "${index + 1}. $tag\"${block.text.replace("\n", " ")}\"",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                                if (result.blocks.size > 5) {
+                                    Text(
+                                        text = "+ ${result.blocks.size - 5} more blocks...",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -190,7 +322,7 @@ fun MainScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "Required Permissions",
+                        text = "Permissions",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -203,7 +335,7 @@ fun MainScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Display over other apps", fontWeight = FontWeight.Medium)
                             Text(
-                                if (hasOverlayPermission) "Granted" else "Required for floating bubble",
+                                if (hasOverlayPermission) "Granted" else "Required for floating bubble & overlay",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = if (hasOverlayPermission) Color(0xFF388E3C) else MaterialTheme.colorScheme.error
                             )
@@ -232,7 +364,7 @@ fun MainScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("Notifications", fontWeight = FontWeight.Medium)
                                 Text(
-                                    if (hasNotificationPermission) "Granted" else "Needed for background service",
+                                    if (hasNotificationPermission) "Granted" else "Needed for background capture service",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = if (hasNotificationPermission) Color(0xFF388E3C) else MaterialTheme.colorScheme.error
                                 )
@@ -253,19 +385,41 @@ fun MainScreen(
 
             // Action Control Buttons
             if (isOverlayRunning) {
-                Button(
-                    onClick = {
-                        OverlayService.stop(context)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    ),
-                    shape = RoundedCornerShape(12.dp)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("Stop Floating Bubble", style = MaterialTheme.typography.titleMedium)
+                    // Toggle Auto-Mode Button
+                    OutlinedButton(
+                        onClick = {
+                            OverlayService.toggleAutoMode(context)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = if (isAutoModeActive) "Switch to Manual Mode" else "Switch to Auto-Reading Mode",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+
+                    // Stop Service Button
+                    Button(
+                        onClick = {
+                            OverlayService.stop(context)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(54.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Stop Floating Bubble", style = MaterialTheme.typography.titleMedium)
+                    }
                 }
             } else {
                 Button(
@@ -280,7 +434,9 @@ fun MainScreen(
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission) {
                                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                             }
-                            OverlayService.start(context)
+                            // Request MediaProjection consent dialog
+                            val mpManager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                            mediaProjectionLauncher.launch(mpManager.createScreenCaptureIntent())
                         }
                     },
                     modifier = Modifier
@@ -294,11 +450,11 @@ fun MainScreen(
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Start Floating Bubble", style = MaterialTheme.typography.titleMedium)
+                    Text("Start Manga Translator", style = MaterialTheme.typography.titleMedium)
                 }
             }
 
-            // How to use Guide Card
+            // Guide Card
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp)
@@ -310,16 +466,18 @@ fun MainScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "How to test Phase 1:",
+                        text = "Phase 3: Manga OCR Features",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        "1. Grant the 'Display over other apps' permission above.\n" +
-                        "2. Tap 'Start Floating Bubble'. A blue translate icon will appear over the screen.\n" +
-                        "3. Drag it around to any position on your screen.\n" +
-                        "4. Tap it once to trigger the translation action.\n" +
-                        "5. Open any other app (or manga reader) — the bubble stays on top ready for Phase 2 (Screen Capture).",
+                        "• ML Kit On-Device Japanese, Chinese, and Korean OCR engine.\n\n" +
+                        "• Vertical Manga Script Detection:\n" +
+                        "   Automatically detects vertical (tategaki) text lines, tags them with [V], and reorders right-to-left lines for correct reading order.\n\n" +
+                        "• Visual Bounding Boxes:\n" +
+                        "   When text is scanned (manually or via auto-read on page turn), blue highlight boxes are drawn directly over each speech bubble on screen.\n\n" +
+                        "• Live Scan Diagnostics:\n" +
+                        "   Return to this screen at any time to see the raw detected manga text and OCR performance metrics in real time.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
