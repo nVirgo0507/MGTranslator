@@ -32,6 +32,9 @@ import com.example.mangatranslator.capture.ScreenCaptureManager
 import com.example.mangatranslator.ocr.MangaOcrEngine
 import com.example.mangatranslator.ocr.OcrLanguage
 import com.example.mangatranslator.ocr.OcrResult
+import com.example.mangatranslator.translation.MangaTranslationEngine
+import com.example.mangatranslator.translation.MangaTranslationResult
+import com.example.mangatranslator.translation.TargetLanguage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,11 +53,12 @@ class OverlayService : Service() {
     private var windowManager: WindowManager? = null
     private var floatingBubbleView: View? = null
     private var translationOverlayView: View? = null
-    private var boundingBoxOverlayView: BoundingBoxOverlayView? = null
+    private var speechBubbleOverlayView: TranslatedSpeechBubbleOverlayView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
 
     private var screenCaptureManager: ScreenCaptureManager? = null
     private val mangaOcrEngine = MangaOcrEngine(OcrLanguage.JAPANESE)
+    private val mangaTranslationEngine = MangaTranslationEngine(OcrLanguage.JAPANESE, TargetLanguage.ENGLISH)
     private var hasMediaProjectionPermission = false
 
     companion object {
@@ -62,9 +66,13 @@ class OverlayService : Service() {
         const val ACTION_STOP = "com.example.mangatranslator.STOP_OVERLAY"
         const val ACTION_TOGGLE_AUTO_MODE = "com.example.mangatranslator.TOGGLE_AUTO_MODE"
         const val ACTION_SET_OCR_LANGUAGE = "com.example.mangatranslator.SET_OCR_LANGUAGE"
+        const val ACTION_SET_TARGET_LANGUAGE = "com.example.mangatranslator.SET_TARGET_LANGUAGE"
+        const val ACTION_TOGGLE_ORIGINAL = "com.example.mangatranslator.TOGGLE_ORIGINAL"
+
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
         const val EXTRA_OCR_LANGUAGE = "extra_ocr_language"
+        const val EXTRA_TARGET_LANGUAGE = "extra_target_language"
 
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "manga_translator_overlay_channel"
@@ -78,8 +86,17 @@ class OverlayService : Service() {
         private val _currentOcrLanguage = MutableStateFlow(OcrLanguage.JAPANESE)
         val currentOcrLanguage: StateFlow<OcrLanguage> = _currentOcrLanguage.asStateFlow()
 
+        private val _currentTargetLanguage = MutableStateFlow(TargetLanguage.ENGLISH)
+        val currentTargetLanguage: StateFlow<TargetLanguage> = _currentTargetLanguage.asStateFlow()
+
         private val _latestOcrResult = MutableStateFlow<OcrResult?>(null)
         val latestOcrResult: StateFlow<OcrResult?> = _latestOcrResult.asStateFlow()
+
+        private val _latestTranslationResult = MutableStateFlow<MangaTranslationResult?>(null)
+        val latestTranslationResult: StateFlow<MangaTranslationResult?> = _latestTranslationResult.asStateFlow()
+
+        private val _modelDownloadStatus = MutableStateFlow<String?>(null)
+        val modelDownloadStatus: StateFlow<String?> = _modelDownloadStatus.asStateFlow()
 
         fun start(context: Context, resultCode: Int? = null, resultData: Intent? = null) {
             val intent = Intent(context, OverlayService::class.java).apply {
@@ -115,6 +132,21 @@ class OverlayService : Service() {
             }
             context.startService(intent)
         }
+
+        fun setTargetLanguage(context: Context, language: TargetLanguage) {
+            val intent = Intent(context, OverlayService::class.java).apply {
+                action = ACTION_SET_TARGET_LANGUAGE
+                putExtra(EXTRA_TARGET_LANGUAGE, language.name)
+            }
+            context.startService(intent)
+        }
+
+        fun toggleOriginalText(context: Context) {
+            val intent = Intent(context, OverlayService::class.java).apply {
+                action = ACTION_TOGGLE_ORIGINAL
+            }
+            context.startService(intent)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -126,6 +158,13 @@ class OverlayService : Service() {
         startInForeground(hasProjection = false)
         setupFloatingBubble()
         setupTranslationOverlay()
+
+        // Proactively warm up and download on-device translation model
+        serviceScope.launch(Dispatchers.IO) {
+            mangaTranslationEngine.ensureModelDownloaded { status ->
+                _modelDownloadStatus.value = status
+            }
+        }
     }
 
     private fun startInForeground(hasProjection: Boolean) {
@@ -159,6 +198,9 @@ class OverlayService : Service() {
             ACTION_TOGGLE_AUTO_MODE -> {
                 toggleAutoModeInternal()
             }
+            ACTION_TOGGLE_ORIGINAL -> {
+                toggleOriginalTextInternal()
+            }
             ACTION_SET_OCR_LANGUAGE -> {
                 val langName = intent.getStringExtra(EXTRA_OCR_LANGUAGE)
                 if (langName != null) {
@@ -166,7 +208,31 @@ class OverlayService : Service() {
                         val language = OcrLanguage.valueOf(langName)
                         _currentOcrLanguage.value = language
                         mangaOcrEngine.setLanguage(language)
-                        Toast.makeText(this, "OCR Language set to $language", Toast.LENGTH_SHORT).show()
+                        mangaTranslationEngine.setLanguages(language, _currentTargetLanguage.value)
+                        Toast.makeText(this, "Source Language: $language", Toast.LENGTH_SHORT).show()
+                        serviceScope.launch(Dispatchers.IO) {
+                            mangaTranslationEngine.ensureModelDownloaded { status ->
+                                _modelDownloadStatus.value = status
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Ignore
+                    }
+                }
+            }
+            ACTION_SET_TARGET_LANGUAGE -> {
+                val targetName = intent.getStringExtra(EXTRA_TARGET_LANGUAGE)
+                if (targetName != null) {
+                    try {
+                        val target = TargetLanguage.valueOf(targetName)
+                        _currentTargetLanguage.value = target
+                        mangaTranslationEngine.setLanguages(_currentOcrLanguage.value, target)
+                        Toast.makeText(this, "Translate to: ${target.displayName}", Toast.LENGTH_SHORT).show()
+                        serviceScope.launch(Dispatchers.IO) {
+                            mangaTranslationEngine.ensureModelDownloaded { status ->
+                                _modelDownloadStatus.value = status
+                            }
+                        }
                     } catch (e: Exception) {
                         // Ignore
                     }
@@ -182,7 +248,6 @@ class OverlayService : Service() {
                 }
 
                 if (resultCode == Activity.RESULT_OK && resultData != null) {
-                    // Elevate foreground service type to include mediaProjection now that user granted consent
                     hasMediaProjectionPermission = true
                     startInForeground(hasProjection = true)
                     initializeScreenCapture(resultCode, resultData)
@@ -201,12 +266,13 @@ class OverlayService : Service() {
         screenCaptureManager?.release()
         screenCaptureManager = null
         mangaOcrEngine.close()
+        mangaTranslationEngine.close()
         removeFloatingBubble()
         removeTranslationOverlay()
     }
 
     private fun initializeScreenCapture(resultCode: Int, resultData: Intent) {
-        val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val projection = mpManager.getMediaProjection(resultCode, resultData) ?: return
 
         screenCaptureManager?.release()
@@ -244,7 +310,7 @@ class OverlayService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Manga Translator Overlay")
-            .setContentText("OCR & Screen capture active. Tap bubble to scan.")
+            .setContentText("Screen capture & on-device translation active.")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(openAppIntent)
             .addAction(R.drawable.ic_translate, "Stop", stopIntent)
@@ -290,6 +356,7 @@ class OverlayService : Service() {
         var initialTouchY = 0f
         var isDragging = false
         var downTime = 0L
+        var lastTapTime = 0L
 
         bubbleView.setOnTouchListener { _, event ->
             when (event.action) {
@@ -323,11 +390,18 @@ class OverlayService : Service() {
                     if (!isDragging) {
                         val duration = System.currentTimeMillis() - downTime
                         if (duration > 600) {
-                            // Long-press: toggle Auto-reading mode
+                            // Long-press (>600ms): toggle Auto-reading mode
                             toggleAutoModeInternal()
                         } else {
-                            // Single-tap: manual single-shot capture & OCR
-                            triggerManualCapture()
+                            val now = System.currentTimeMillis()
+                            if (now - lastTapTime < 350 && speechBubbleOverlayView?.hasTranslations == true) {
+                                // Double-tap: Toggle between original and translated text
+                                toggleOriginalTextInternal()
+                            } else {
+                                // Single-tap: Trigger manual scan & translation
+                                triggerManualCapture()
+                            }
+                            lastTapTime = now
                         }
                     }
                     true
@@ -349,9 +423,9 @@ class OverlayService : Service() {
         translationOverlayView = overlayView
 
         val container = overlayView.findViewById<FrameLayout>(R.id.translation_bubbles_container)
-        val boxOverlay = BoundingBoxOverlayView(this)
-        boundingBoxOverlayView = boxOverlay
-        container.addView(boxOverlay)
+        val speechOverlay = TranslatedSpeechBubbleOverlayView(this)
+        speechBubbleOverlayView = speechOverlay
+        container.addView(speechOverlay)
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -380,17 +454,18 @@ class OverlayService : Service() {
             return
         }
 
-        // Hide overlay and bubble briefly to avoid capturing our own UI elements
-        floatingBubbleView?.visibility = View.INVISIBLE
+        // Hide overlay and bubble completely before frame capture to prevent self-occlusion
+        floatingBubbleView?.visibility = View.GONE
         clearTranslationBubbles()
 
         serviceScope.launch {
-            delay(50) // Allow 1 frame for bubble to hide
+            // Delay 120ms to allow display compositor to produce clean frame without floating bubble
+            delay(120)
             val bitmap = manager.captureLatestBitmap()
             floatingBubbleView?.visibility = View.VISIBLE
 
             if (bitmap != null) {
-                processOcrOnBitmap(bitmap, isAuto = false)
+                processOcrAndTranslation(bitmap, isAuto = false)
             } else {
                 Toast.makeText(this@OverlayService, "Screen capture failed, please retry.", Toast.LENGTH_SHORT).show()
             }
@@ -405,7 +480,7 @@ class OverlayService : Service() {
         badge?.visibility = if (newStatus) View.VISIBLE else View.GONE
 
         if (newStatus) {
-            Toast.makeText(this, "Auto-reading mode ON: Turning pages will translate automatically!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Auto-reading mode ON: Translating pages automatically!", Toast.LENGTH_SHORT).show()
             startAutoReading()
         } else {
             Toast.makeText(this, "Auto-reading mode OFF: Manual tap mode.", Toast.LENGTH_SHORT).show()
@@ -414,56 +489,83 @@ class OverlayService : Service() {
         }
     }
 
+    private fun toggleOriginalTextInternal() {
+        val overlay = speechBubbleOverlayView ?: return
+        val isShowingOriginal = overlay.toggleDisplayMode()
+        val label = if (isShowingOriginal) "Showing Original Text" else "Showing Translated English"
+        Toast.makeText(this, label, Toast.LENGTH_SHORT).show()
+    }
+
     private fun startAutoReading() {
         val manager = screenCaptureManager ?: return
         manager.startAutoCapture(
             onPageChanging = {
-                // Page is turning/scrolling -> clear old translations immediately
                 clearTranslationBubbles()
                 showStatusBadge("Turning page...")
             },
             onPageSettled = { newPageBitmap ->
-                showStatusBadge("Page settled! Reading...")
-                processOcrOnBitmap(newPageBitmap, isAuto = true)
+                showStatusBadge("Page settled! Translating...")
+                processOcrAndTranslation(newPageBitmap, isAuto = true)
             }
         )
     }
 
-    private fun processOcrOnBitmap(bitmap: Bitmap, isAuto: Boolean) {
+    private fun processOcrAndTranslation(bitmap: Bitmap, isAuto: Boolean) {
         serviceScope.launch {
             try {
                 val modeTag = if (isAuto) "[Auto]" else "[Manual]"
-                showStatusBadge("$modeTag Running Manga OCR...")
+                showStatusBadge("$modeTag Scanning manga dialogue...")
 
-                val result = mangaOcrEngine.processImage(bitmap)
-                _latestOcrResult.value = result
+                val ocrStart = System.currentTimeMillis()
+                val ocrResult = mangaOcrEngine.processImage(bitmap)
+                val ocrTime = System.currentTimeMillis() - ocrStart
+                _latestOcrResult.value = ocrResult
 
-                // Render detected speech bubbles and bounding boxes
-                boundingBoxOverlayView?.setBlocks(result.blocks)
-
-                val blockCount = result.blocks.size
-                val verticalCount = result.blocks.count { it.isVertical }
-                val statusMsg = if (blockCount == 0) {
-                    "$modeTag No text detected (${result.executionTimeMs}ms)"
-                } else {
-                    "$modeTag Found $blockCount blocks ($verticalCount vertical) in ${result.executionTimeMs}ms"
+                if (ocrResult.blocks.isEmpty()) {
+                    showStatusBadge("$modeTag No speech bubbles detected")
+                    speechBubbleOverlayView?.clear()
+                    delay(2000)
+                    translationOverlayView?.findViewById<View>(R.id.tv_capture_status)?.visibility = View.GONE
+                    return@launch
                 }
 
+                showStatusBadge("$modeTag Translating ${ocrResult.blocks.size} speech bubbles...")
+
+                val transStart = System.currentTimeMillis()
+                val translatedBlocks = mangaTranslationEngine.translateBlocks(ocrResult.blocks) { status ->
+                    showStatusBadge(status)
+                }
+                val transTime = System.currentTimeMillis() - transStart
+
+                val translationResult = MangaTranslationResult(
+                    blocks = translatedBlocks,
+                    executionTimeMs = ocrTime + transTime,
+                    ocrTimeMs = ocrTime,
+                    translationTimeMs = transTime,
+                    sourceLanguage = _currentOcrLanguage.value.name,
+                    targetLanguage = _currentTargetLanguage.value.displayName
+                )
+                _latestTranslationResult.value = translationResult
+
+                // Render clean translated speech bubbles directly covering original dialogue
+                speechBubbleOverlayView?.setTranslatedBlocks(translatedBlocks, showOriginal = false)
+
+                val statusMsg = "$modeTag Translated ${translatedBlocks.size} bubbles in ${ocrTime + transTime}ms"
                 showStatusBadge(statusMsg)
 
-                // Auto-hide status badge after 3 seconds
+                // Auto-hide status banner after 3 seconds
                 delay(3000)
                 translationOverlayView?.findViewById<View>(R.id.tv_capture_status)?.visibility = View.GONE
             } catch (e: Throwable) {
-                // Safeguard against unhandled OCR / UI errors
+                // Safeguard against unhandled exceptions
             } finally {
-                bitmap.recycle() // Recycle large screen bitmap to avoid OOM
+                bitmap.recycle() // Recycle native bitmap immediately
             }
         }
     }
 
     private fun clearTranslationBubbles() {
-        boundingBoxOverlayView?.clear()
+        speechBubbleOverlayView?.clear()
     }
 
     private fun showStatusBadge(text: String) {
@@ -491,7 +593,7 @@ class OverlayService : Service() {
                 // View might already be detached
             }
             translationOverlayView = null
-            boundingBoxOverlayView = null
+            speechBubbleOverlayView = null
         }
     }
 }

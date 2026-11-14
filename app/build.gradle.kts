@@ -82,9 +82,10 @@ dependencies {
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
 
-  // ML Kit Text Recognition
+  // ML Kit Text Recognition & On-Device Translation
   implementation(libs.mlkit.text.japanese)
   implementation(libs.mlkit.text.chinese)
   implementation(libs.mlkit.text.korean)
+  implementation(libs.mlkit.translate)
   implementation(libs.kotlinx.coroutines.play.services)
 }

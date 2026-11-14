@@ -66,6 +66,7 @@ import androidx.navigation3.runtime.NavKey
 import com.example.mangatranslator.R
 import com.example.mangatranslator.ocr.OcrLanguage
 import com.example.mangatranslator.overlay.OverlayService
+import com.example.mangatranslator.translation.TargetLanguage
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -134,7 +135,9 @@ fun MainScreen(
     val isOverlayRunning by OverlayService.isServiceRunning.collectAsStateWithLifecycle()
     val isAutoModeActive by OverlayService.isAutoModeActive.collectAsStateWithLifecycle()
     val currentOcrLanguage by OverlayService.currentOcrLanguage.collectAsStateWithLifecycle()
-    val latestOcrResult by OverlayService.latestOcrResult.collectAsStateWithLifecycle()
+    val currentTargetLanguage by OverlayService.currentTargetLanguage.collectAsStateWithLifecycle()
+    val latestTranslationResult by OverlayService.latestTranslationResult.collectAsStateWithLifecycle()
+    val modelDownloadStatus by OverlayService.modelDownloadStatus.collectAsStateWithLifecycle()
 
     Scaffold(
         modifier = modifier,
@@ -187,29 +190,35 @@ fun MainScreen(
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (isOverlayRunning) "Overlay & OCR Active" else "Translator Inactive",
+                                text = if (isOverlayRunning) "Overlay & Translation Active" else "Translator Inactive",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
                                 text = if (isOverlayRunning) {
-                                    if (isAutoModeActive) {
-                                        "Mode: Auto-Read (Translates on page turns) • Lang: $currentOcrLanguage"
-                                    } else {
-                                        "Mode: Manual Tap (Tap bubble to scan) • Lang: $currentOcrLanguage"
-                                    }
+                                    val mode = if (isAutoModeActive) "Auto-Reading" else "Manual Tap"
+                                    "Mode: $mode • $currentOcrLanguage → ${currentTargetLanguage.displayName}"
                                 } else {
-                                    "Start service to enable floating bubble & manga OCR."
+                                    "Start service to enable floating bubble & manga translation."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
+
+                    modelDownloadStatus?.let { status ->
+                        Text(
+                            text = "⚡ $status",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             }
 
-            // OCR Language Selection Card
+            // Language Selection Card
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp)
@@ -218,10 +227,10 @@ fun MainScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "Manga Script / Language",
+                        text = "Manga Source Language",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -247,11 +256,31 @@ fun MainScreen(
                             )
                         }
                     }
+
+                    Text(
+                        text = "Translate To",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TargetLanguage.entries.take(4).forEach { target ->
+                            FilterChip(
+                                selected = currentTargetLanguage == target,
+                                onClick = {
+                                    OverlayService.setTargetLanguage(context, target)
+                                },
+                                label = { Text(target.displayName) }
+                            )
+                        }
+                    }
                 }
             }
 
-            // Live OCR Diagnostics Card (shows recognized manga text in real time)
-            latestOcrResult?.let { result ->
+            // Live Translation Diagnostics Card (shows recognized vs translated manga text)
+            latestTranslationResult?.let { result ->
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(
@@ -263,20 +292,20 @@ fun MainScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Latest OCR Scan",
+                                text = "Latest Translation",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.weight(1f)
                             )
                             Text(
-                                text = "${result.executionTimeMs}ms • ${result.blocks.size} blocks (${result.blocks.count { it.isVertical }} vert)",
+                                text = "${result.executionTimeMs}ms (OCR ${result.ocrTimeMs}ms • Trans ${result.translationTimeMs}ms)",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
@@ -284,23 +313,37 @@ fun MainScreen(
 
                         if (result.blocks.isEmpty()) {
                             Text(
-                                "No speech bubbles or text detected on the latest screen frame.",
+                                "No speech bubbles or dialogue detected on screen.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
                             )
                         } else {
-                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 result.blocks.take(5).forEachIndexed { index, block ->
                                     val tag = if (block.isVertical) "[Vertical] " else ""
-                                    Text(
-                                        text = "${index + 1}. $tag\"${block.text.replace("\n", " ")}\"",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontWeight = FontWeight.Medium
-                                    )
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
+                                            .padding(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "$tag\"${block.originalText}\"",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = "↳ \"${block.translatedText}\"",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
                                 if (result.blocks.size > 5) {
                                     Text(
-                                        text = "+ ${result.blocks.size - 5} more blocks...",
+                                        text = "+ ${result.blocks.size - 5} more speech bubbles on screen...",
                                         style = MaterialTheme.typography.labelSmall
                                     )
                                 }
@@ -389,6 +432,22 @@ fun MainScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    // Toggle Original vs English View Button
+                    FilledTonalButton(
+                        onClick = {
+                            OverlayService.toggleOriginalText(context)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = "Toggle Original / English Overlay",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+
                     // Toggle Auto-Mode Button
                     OutlinedButton(
                         onClick = {
@@ -454,7 +513,7 @@ fun MainScreen(
                 }
             }
 
-            // Guide Card
+            // Phase 4 Guide Card
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp)
@@ -466,18 +525,21 @@ fun MainScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "Phase 3: Manga OCR Features",
+                        text = "Phase 4: Manga Translation Overlay",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        "• ML Kit On-Device Japanese, Chinese, and Korean OCR engine.\n\n" +
-                        "• Vertical Manga Script Detection:\n" +
-                        "   Automatically detects vertical (tategaki) text lines, tags them with [V], and reorders right-to-left lines for correct reading order.\n\n" +
-                        "• Visual Bounding Boxes:\n" +
-                        "   When text is scanned (manually or via auto-read on page turn), blue highlight boxes are drawn directly over each speech bubble on screen.\n\n" +
-                        "• Live Scan Diagnostics:\n" +
-                        "   Return to this screen at any time to see the raw detected manga text and OCR performance metrics in real time.",
+                        "• On-Device ML Kit Translation:\n" +
+                        "   Free, private, zero-latency on-device translation for Japanese, Chinese, and Korean into English.\n\n" +
+                        "• Speech Bubble Replacement Overlay:\n" +
+                        "   Replaces original Japanese speech bubbles with clean, styled white speech bubbles and auto-wrapped English text directly over the manga page.\n\n" +
+                        "• Interactive Controls:\n" +
+                        "   • Single tap bubble: Scan and translate current screen.\n" +
+                        "   • Double tap bubble: Toggle between translated English and original text.\n" +
+                        "   • Long press bubble: Toggle Auto-Reading mode on/off.\n\n" +
+                        "• Automatic Page-Turn Translation:\n" +
+                        "   In Auto-Reading mode, turning the manga page translates new dialogue automatically as soon as the page settles.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
